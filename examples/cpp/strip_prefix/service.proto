@@ -1,13 +1,7 @@
 syntax = "proto3";
 
+import "custom/prefix/messages.proto";
+
 service HelloService {
     rpc SayHello (HelloRequest) returns (HelloResponse);
-}
-
-message HelloRequest {
-    string greeting = 1;
-}
-
-message HelloResponse {
-    string reply = 1;
 }
