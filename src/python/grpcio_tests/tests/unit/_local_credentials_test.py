@@ -13,9 +13,10 @@
 # limitations under the License.
 """Test of RPCs made using local credentials."""
 
-import unittest
-import os
 from concurrent.futures import ThreadPoolExecutor
+import os
+import unittest
+
 import grpc
 
 
@@ -47,9 +48,10 @@ class LocalCredentialsTest(unittest.TestCase):
         server.start()
         with grpc.secure_channel(server_addr.format(port),
                                  channel_creds) as channel:
-            self.assertEqual(b'abc',
-                             channel.unary_unary('/test/method')(
-                                 b'abc', wait_for_ready=True))
+            self.assertEqual(
+                b'abc',
+                channel.unary_unary('/test/method')(b'abc',
+                                                    wait_for_ready=True))
         server.stop(None)
 
     @unittest.skipIf(os.name == 'nt',
@@ -65,9 +67,10 @@ class LocalCredentialsTest(unittest.TestCase):
         server.add_secure_port(server_addr, server_creds)
         server.start()
         with grpc.secure_channel(server_addr, channel_creds) as channel:
-            self.assertEqual(b'abc',
-                             channel.unary_unary('/test/method')(
-                                 b'abc', wait_for_ready=True))
+            self.assertEqual(
+                b'abc',
+                channel.unary_unary('/test/method')(b'abc',
+                                                    wait_for_ready=True))
         server.stop(None)
 
 

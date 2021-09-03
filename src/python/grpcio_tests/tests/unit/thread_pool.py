@@ -12,8 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import threading
 from concurrent import futures
+import threading
 
 
 class RecordingThreadPool(futures.ThreadPoolExecutor):
@@ -24,7 +24,7 @@ class RecordingThreadPool(futures.ThreadPoolExecutor):
         self._lock = threading.Lock()
         self._was_used = False
 
-    def submit(self, fn, *args, **kwargs):
+    def submit(self, fn, *args, **kwargs):  # pylint: disable=arguments-differ
         with self._lock:
             self._was_used = True
         self._tp_executor.submit(fn, *args, **kwargs)

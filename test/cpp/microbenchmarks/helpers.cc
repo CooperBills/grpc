@@ -32,13 +32,11 @@ LibraryInitializer::LibraryInitializer() {
   grpc_memory_counters_init();
 #endif
   init_lib_.init();
-  rq_ = grpc_resource_quota_create("bm");
 }
 
 LibraryInitializer::~LibraryInitializer() {
   g_libraryInitializer = nullptr;
   init_lib_.shutdown();
-  grpc_resource_quota_unref(rq_);
 }
 
 LibraryInitializer& LibraryInitializer::get() {
@@ -59,11 +57,15 @@ void TrackCounters::Finish(benchmark::State& state) {
   state.SetLabel(label.c_str());
 }
 
-void TrackCounters::AddLabel(const grpc::string& label) {
+void TrackCounters::AddLabel(const std::string& label) {
   labels_.push_back(label);
 }
 
 void TrackCounters::AddToLabel(std::ostream& out, benchmark::State& state) {
+  // Use the parameters to avoid unused-parameter warnings depending on the
+  // #define's present
+  (void)out;
+  (void)state;
 #ifdef GRPC_COLLECT_STATS
   grpc_stats_data stats_end;
   grpc_stats_collect(&stats_end);

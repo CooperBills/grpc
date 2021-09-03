@@ -29,7 +29,7 @@ INTEROP=../../../bazel-out/darwin-fastbuild/bin/test/cpp/interop/interop_server
 }
 
 [ -f $INTEROP ] || {
-    BAZEL build //test/cpp/interop:interop_server
+    $BAZEL build //test/cpp/interop:interop_server
 }
 
 [ -z "$(ps aux |egrep 'port_server\.py.*-p\s32766')" ] && {
@@ -86,6 +86,7 @@ xcodebuild \
     HOST_PORT_LOCAL=localhost:$PLAIN_PORT \
     HOST_PORT_REMOTE=grpc-test.sandbox.googleapis.com \
     test \
+    | ./verbose_time.sh \
     | egrep -v "$XCODEBUILD_FILTER" \
     | egrep -v '^$' \
     | egrep -v "(GPBDictionary|GPBArray)" -

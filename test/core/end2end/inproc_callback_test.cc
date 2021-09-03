@@ -32,21 +32,22 @@
 #include "test/core/util/test_config.h"
 
 typedef struct inproc_fixture_data {
-  bool dummy;  // reserved for future expansion. Struct can't be empty
+  bool phony;  // reserved for future expansion. Struct can't be empty
 } inproc_fixture_data;
 
 namespace {
 template <typename F>
-class CQDeletingCallback : public grpc_experimental_completion_queue_functor {
+class CQDeletingCallback : public grpc_completion_queue_functor {
  public:
   explicit CQDeletingCallback(F f) : func_(f) {
     functor_run = &CQDeletingCallback::Run;
+    inlineable = false;
   }
   ~CQDeletingCallback() {}
-  static void Run(grpc_experimental_completion_queue_functor* cb, int ok) {
+  static void Run(grpc_completion_queue_functor* cb, int ok) {
     auto* callback = static_cast<CQDeletingCallback*>(cb);
     callback->func_(static_cast<bool>(ok));
-    grpc_core::Delete(callback);
+    delete callback;
   }
 
  private:
@@ -54,14 +55,15 @@ class CQDeletingCallback : public grpc_experimental_completion_queue_functor {
 };
 
 template <typename F>
-grpc_experimental_completion_queue_functor* NewDeletingCallback(F f) {
-  return grpc_core::New<CQDeletingCallback<F>>(f);
+grpc_completion_queue_functor* NewDeletingCallback(F f) {
+  return new CQDeletingCallback<F>(f);
 }
 
-class ShutdownCallback : public grpc_experimental_completion_queue_functor {
+class ShutdownCallback : public grpc_completion_queue_functor {
  public:
   ShutdownCallback() : done_(false) {
     functor_run = &ShutdownCallback::StaticRun;
+    inlineable = false;
     gpr_mu_init(&mu_);
     gpr_cv_init(&cv_);
   }
@@ -69,8 +71,7 @@ class ShutdownCallback : public grpc_experimental_completion_queue_functor {
     gpr_mu_destroy(&mu_);
     gpr_cv_destroy(&cv_);
   }
-  static void StaticRun(grpc_experimental_completion_queue_functor* cb,
-                        int ok) {
+  static void StaticRun(grpc_completion_queue_functor* cb, int ok) {
     auto* callback = static_cast<ShutdownCallback*>(cb);
     callback->Run(static_cast<bool>(ok));
   }
@@ -182,7 +183,7 @@ static void verify_tags(gpr_timespec deadline) {
 
 // This function creates a callback functor that emits the
 // desired tag into the global tag set
-static grpc_experimental_completion_queue_functor* tag(intptr_t t) {
+static grpc_completion_queue_functor* tag(intptr_t t) {
   auto func = [t](bool ok) {
     gpr_mu_lock(&tags_mu);
     gpr_log(GPR_DEBUG, "Completing operation %" PRIdPTR, t);
@@ -212,7 +213,7 @@ static grpc_end2end_test_fixture inproc_create_fixture(
   memset(&f, 0, sizeof(f));
 
   f.fixture_data = ffd;
-  g_shutdown_callback = grpc_core::New<ShutdownCallback>();
+  g_shutdown_callback = new ShutdownCallback();
   f.cq =
       grpc_completion_queue_create_for_callback(g_shutdown_callback, nullptr);
   f.shutdown_cq = grpc_completion_queue_create_for_pluck(nullptr);
@@ -263,7 +264,7 @@ static void drain_cq(grpc_completion_queue* /*cq*/) {
   // Wait for the shutdown callback to arrive, or fail the test
   GPR_ASSERT(g_shutdown_callback->Wait(five_seconds_from_now()));
   gpr_log(GPR_DEBUG, "CQ shutdown wait complete");
-  grpc_core::Delete(g_shutdown_callback);
+  delete g_shutdown_callback;
 }
 
 static void shutdown_server(grpc_end2end_test_fixture* f) {
@@ -420,7 +421,7 @@ static void simple_request_body(grpc_end2end_test_config config,
   GPR_ASSERT(nullptr != strstr(error_string, "grpc_status"));
   GPR_ASSERT(0 == grpc_slice_str_cmp(call_details.method, "/foo"));
   GPR_ASSERT(0 == call_details.flags);
-  GPR_ASSERT(was_cancelled == 1);
+  GPR_ASSERT(was_cancelled == 0);
 
   grpc_slice_unref(details);
   gpr_free(static_cast<void*>(const_cast<char*>(error_string)));

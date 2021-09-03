@@ -46,20 +46,19 @@ grpc_core::DebugOnlyTraceFlag grpc_combiner_trace(false, "combiner");
 #define STATE_ELEM_COUNT_LOW_BIT 2
 
 static void combiner_exec(grpc_core::Combiner* lock, grpc_closure* closure,
-                          grpc_error* error);
+                          grpc_error_handle error);
 static void combiner_finally_exec(grpc_core::Combiner* lock,
-                                  grpc_closure* closure, grpc_error* error);
+                                  grpc_closure* closure,
+                                  grpc_error_handle error);
 
-static void offload(void* arg, grpc_error* error);
+static void offload(void* arg, grpc_error_handle error);
 
 grpc_core::Combiner* grpc_combiner_create(void) {
-  grpc_core::Combiner* lock = grpc_core::New<grpc_core::Combiner>();
+  grpc_core::Combiner* lock = new grpc_core::Combiner();
   gpr_ref_init(&lock->refs, 1);
   gpr_atm_no_barrier_store(&lock->state, STATE_UNORPHANED);
   grpc_closure_list_init(&lock->final_list);
-  GRPC_CLOSURE_INIT(
-      &lock->offload, offload, lock,
-      grpc_core::Executor::Scheduler(grpc_core::ExecutorJobType::SHORT));
+  GRPC_CLOSURE_INIT(&lock->offload, offload, lock, nullptr);
   GRPC_COMBINER_TRACE(gpr_log(GPR_INFO, "C:%p create", lock));
   return lock;
 }
@@ -67,7 +66,7 @@ grpc_core::Combiner* grpc_combiner_create(void) {
 static void really_destroy(grpc_core::Combiner* lock) {
   GRPC_COMBINER_TRACE(gpr_log(GPR_INFO, "C:%p really_destroy", lock));
   GPR_ASSERT(gpr_atm_no_barrier_load(&lock->state) == 0);
-  grpc_core::Delete(lock);
+  delete lock;
 }
 
 static void start_destroy(grpc_core::Combiner* lock) {
@@ -128,7 +127,7 @@ static void push_first_on_exec_ctx(grpc_core::Combiner* lock) {
 }
 
 static void combiner_exec(grpc_core::Combiner* lock, grpc_closure* cl,
-                          grpc_error* error) {
+                          grpc_error_handle error) {
   GPR_TIMER_SCOPE("combiner.execute", 0);
   GRPC_STATS_INC_COMBINER_LOCKS_SCHEDULED_ITEMS();
   gpr_atm last = gpr_atm_full_fetch_add(&lock->state, STATE_ELEM_COUNT_LOW_BIT);
@@ -138,8 +137,9 @@ static void combiner_exec(grpc_core::Combiner* lock, grpc_closure* cl,
   if (last == 1) {
     GRPC_STATS_INC_COMBINER_LOCKS_INITIATED();
     GPR_TIMER_MARK("combiner.initiated", 0);
-    gpr_atm_no_barrier_store(&lock->initiating_exec_ctx_or_null,
-                             (gpr_atm)grpc_core::ExecCtx::Get());
+    gpr_atm_no_barrier_store(
+        &lock->initiating_exec_ctx_or_null,
+        reinterpret_cast<gpr_atm>(grpc_core::ExecCtx::Get()));
     // first element on this list: add it to the list of combiner locks
     // executing within this exec_ctx
     push_last_on_exec_ctx(lock);
@@ -148,7 +148,8 @@ static void combiner_exec(grpc_core::Combiner* lock, grpc_closure* cl,
     // offload for one or two actions, and that's fine
     gpr_atm initiator =
         gpr_atm_no_barrier_load(&lock->initiating_exec_ctx_or_null);
-    if (initiator != 0 && initiator != (gpr_atm)grpc_core::ExecCtx::Get()) {
+    if (initiator != 0 &&
+        initiator != reinterpret_cast<gpr_atm>(grpc_core::ExecCtx::Get())) {
       gpr_atm_no_barrier_store(&lock->initiating_exec_ctx_or_null, 0);
     }
   }
@@ -168,7 +169,7 @@ static void move_next() {
   }
 }
 
-static void offload(void* arg, grpc_error* error) {
+static void offload(void* arg, grpc_error_handle /*error*/) {
   grpc_core::Combiner* lock = static_cast<grpc_core::Combiner*>(arg);
   push_last_on_exec_ctx(lock);
 }
@@ -177,7 +178,7 @@ static void queue_offload(grpc_core::Combiner* lock) {
   GRPC_STATS_INC_COMBINER_LOCKS_OFFLOADED();
   move_next();
   GRPC_COMBINER_TRACE(gpr_log(GPR_INFO, "C:%p queue_offload", lock));
-  GRPC_CLOSURE_SCHED(&lock->offload, GRPC_ERROR_NONE);
+  grpc_core::Executor::Run(&lock->offload, GRPC_ERROR_NONE);
 }
 
 bool grpc_combiner_continue_exec_ctx() {
@@ -231,7 +232,7 @@ bool grpc_combiner_continue_exec_ctx() {
     }
     GPR_TIMER_SCOPE("combiner.exec1", 0);
     grpc_closure* cl = reinterpret_cast<grpc_closure*>(n);
-    grpc_error* cl_err = cl->error_data.error;
+    grpc_error_handle cl_err = cl->error_data.error;
 #ifndef NDEBUG
     cl->scheduled = false;
 #endif
@@ -247,7 +248,7 @@ bool grpc_combiner_continue_exec_ctx() {
       GRPC_COMBINER_TRACE(
           gpr_log(GPR_INFO, "C:%p execute_final[%d] c=%p", lock, loops, c));
       grpc_closure* next = c->next_data.next;
-      grpc_error* error = c->error_data.error;
+      grpc_error_handle error = c->error_data.error;
 #ifndef NDEBUG
       c->scheduled = false;
 #endif
@@ -298,10 +299,11 @@ bool grpc_combiner_continue_exec_ctx() {
   return true;
 }
 
-static void enqueue_finally(void* closure, grpc_error* error);
+static void enqueue_finally(void* closure, grpc_error_handle error);
 
 static void combiner_finally_exec(grpc_core::Combiner* lock,
-                                  grpc_closure* closure, grpc_error* error) {
+                                  grpc_closure* closure,
+                                  grpc_error_handle error) {
   GPR_ASSERT(lock != nullptr);
   GPR_TIMER_SCOPE("combiner.execute_finally", 0);
   GRPC_STATS_INC_COMBINER_LOCKS_SCHEDULED_FINAL_ITEMS();
@@ -310,9 +312,9 @@ static void combiner_finally_exec(grpc_core::Combiner* lock,
       grpc_core::ExecCtx::Get()->combiner_data()->active_combiner));
   if (grpc_core::ExecCtx::Get()->combiner_data()->active_combiner != lock) {
     GPR_TIMER_MARK("slowpath", 0);
-    // Reusing scheduler to store the combiner so that it can be accessed in
-    // enqueue_finally
-    closure->scheduler = reinterpret_cast<grpc_closure_scheduler*>(lock);
+    // Using error_data.scratch to store the combiner so that it can be accessed
+    // in enqueue_finally.
+    closure->error_data.scratch = reinterpret_cast<uintptr_t>(lock);
     lock->Run(GRPC_CLOSURE_CREATE(enqueue_finally, closure, nullptr), error);
     return;
   }
@@ -323,24 +325,19 @@ static void combiner_finally_exec(grpc_core::Combiner* lock,
   grpc_closure_list_append(&lock->final_list, closure, error);
 }
 
-static void enqueue_finally(void* closure, grpc_error* error) {
+static void enqueue_finally(void* closure, grpc_error_handle error) {
   grpc_closure* cl = static_cast<grpc_closure*>(closure);
-  combiner_finally_exec(reinterpret_cast<grpc_core::Combiner*>(cl->scheduler),
-                        cl, GRPC_ERROR_REF(error));
+  combiner_finally_exec(
+      reinterpret_cast<grpc_core::Combiner*>(cl->error_data.scratch), cl,
+      GRPC_ERROR_REF(error));
 }
 
 namespace grpc_core {
-void Combiner::Run(grpc_closure* closure, grpc_error* error) {
-  GPR_ASSERT(closure->scheduler == nullptr ||
-             closure->scheduler ==
-                 reinterpret_cast<grpc_closure_scheduler*>(this));
+void Combiner::Run(grpc_closure* closure, grpc_error_handle error) {
   combiner_exec(this, closure, error);
 }
 
-void Combiner::FinallyRun(grpc_closure* closure, grpc_error* error) {
-  GPR_ASSERT(closure->scheduler == nullptr ||
-             closure->scheduler ==
-                 reinterpret_cast<grpc_closure_scheduler*>(this));
+void Combiner::FinallyRun(grpc_closure* closure, grpc_error_handle error) {
   combiner_finally_exec(this, closure, error);
 }
 }  // namespace grpc_core

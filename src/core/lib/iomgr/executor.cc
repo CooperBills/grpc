@@ -53,52 +53,37 @@
 namespace grpc_core {
 namespace {
 
-GPR_TLS_DECL(g_this_thread_state);
+static GPR_THREAD_LOCAL(ThreadState*) g_this_thread_state;
 
 Executor* executors[static_cast<size_t>(ExecutorType::NUM_EXECUTORS)];
 
-void default_enqueue_short(grpc_closure* closure, grpc_error* error) {
+void default_enqueue_short(grpc_closure* closure, grpc_error_handle error) {
   executors[static_cast<size_t>(ExecutorType::DEFAULT)]->Enqueue(
       closure, error, true /* is_short */);
 }
 
-void default_enqueue_long(grpc_closure* closure, grpc_error* error) {
+void default_enqueue_long(grpc_closure* closure, grpc_error_handle error) {
   executors[static_cast<size_t>(ExecutorType::DEFAULT)]->Enqueue(
       closure, error, false /* is_short */);
 }
 
-void resolver_enqueue_short(grpc_closure* closure, grpc_error* error) {
+void resolver_enqueue_short(grpc_closure* closure, grpc_error_handle error) {
   executors[static_cast<size_t>(ExecutorType::RESOLVER)]->Enqueue(
       closure, error, true /* is_short */);
 }
 
-void resolver_enqueue_long(grpc_closure* closure, grpc_error* error) {
+void resolver_enqueue_long(grpc_closure* closure, grpc_error_handle error) {
   executors[static_cast<size_t>(ExecutorType::RESOLVER)]->Enqueue(
       closure, error, false /* is_short */);
 }
 
-const grpc_closure_scheduler_vtable
-    vtables_[static_cast<size_t>(ExecutorType::NUM_EXECUTORS)]
-            [static_cast<size_t>(ExecutorJobType::NUM_JOB_TYPES)] = {
-                {{&default_enqueue_short, &default_enqueue_short,
-                  "def-ex-short"},
-                 {&default_enqueue_long, &default_enqueue_long, "def-ex-long"}},
-                {{&resolver_enqueue_short, &resolver_enqueue_short,
-                  "res-ex-short"},
-                 {&resolver_enqueue_long, &resolver_enqueue_long,
-                  "res-ex-long"}}};
+using EnqueueFunc = void (*)(grpc_closure* closure, grpc_error_handle error);
 
-grpc_closure_scheduler
-    schedulers_[static_cast<size_t>(ExecutorType::NUM_EXECUTORS)]
-               [static_cast<size_t>(ExecutorJobType::NUM_JOB_TYPES)] = {
-                   {{&vtables_[static_cast<size_t>(ExecutorType::DEFAULT)]
-                              [static_cast<size_t>(ExecutorJobType::SHORT)]},
-                    {&vtables_[static_cast<size_t>(ExecutorType::DEFAULT)]
-                              [static_cast<size_t>(ExecutorJobType::LONG)]}},
-                   {{&vtables_[static_cast<size_t>(ExecutorType::RESOLVER)]
-                              [static_cast<size_t>(ExecutorJobType::SHORT)]},
-                    {&vtables_[static_cast<size_t>(ExecutorType::RESOLVER)]
-                              [static_cast<size_t>(ExecutorJobType::LONG)]}}};
+const EnqueueFunc
+    executor_enqueue_fns_[static_cast<size_t>(ExecutorType::NUM_EXECUTORS)]
+                         [static_cast<size_t>(ExecutorJobType::NUM_JOB_TYPES)] =
+                             {{default_enqueue_short, default_enqueue_long},
+                              {resolver_enqueue_short, resolver_enqueue_long}};
 
 }  // namespace
 
@@ -130,7 +115,7 @@ size_t Executor::RunClosures(const char* executor_name,
   grpc_closure* c = list.head;
   while (c != nullptr) {
     grpc_closure* next = c->next_data.next;
-    grpc_error* error = c->error_data.error;
+    grpc_error_handle error = c->error_data.error;
 #ifndef NDEBUG
     EXECUTOR_TRACE("(%s) run %p [created by %s:%d]", executor_name, c,
                    c->file_created, c->line_created);
@@ -158,7 +143,7 @@ void Executor::SetThreading(bool threading) {
 
   if (threading) {
     if (curr_num_threads > 0) {
-      EXECUTOR_TRACE("(%s) SetThreading(true). curr_num_threads == 0", name_);
+      EXECUTOR_TRACE("(%s) SetThreading(true). curr_num_threads > 0", name_);
       return;
     }
 
@@ -229,7 +214,7 @@ void Executor::Shutdown() { SetThreading(false); }
 
 void Executor::ThreadMain(void* arg) {
   ThreadState* ts = static_cast<ThreadState*>(arg);
-  gpr_tls_set(&g_this_thread_state, reinterpret_cast<intptr_t>(ts));
+  g_this_thread_state = ts;
 
   grpc_core::ExecCtx exec_ctx(GRPC_EXEC_CTX_FLAG_IS_INTERNAL_THREAD);
 
@@ -263,10 +248,10 @@ void Executor::ThreadMain(void* arg) {
     subtract_depth = RunClosures(ts->name, closures);
   }
 
-  gpr_tls_set(&g_this_thread_state, reinterpret_cast<intptr_t>(nullptr));
+  g_this_thread_state = nullptr;
 }
 
-void Executor::Enqueue(grpc_closure* closure, grpc_error* error,
+void Executor::Enqueue(grpc_closure* closure, grpc_error_handle error,
                        bool is_short) {
   bool retry_push;
   if (is_short) {
@@ -298,7 +283,7 @@ void Executor::Enqueue(grpc_closure* closure, grpc_error* error,
       return;
     }
 
-    ThreadState* ts = (ThreadState*)gpr_tls_get(&g_this_thread_state);
+    ThreadState* ts = g_this_thread_state;
     if (ts == nullptr) {
       ts = &thd_state_[GPR_HASH_POINTER(grpc_core::ExecCtx::Get(),
                                         cur_thread_count)];
@@ -408,9 +393,9 @@ void Executor::InitAll() {
   }
 
   executors[static_cast<size_t>(ExecutorType::DEFAULT)] =
-      grpc_core::New<Executor>("default-executor");
+      new Executor("default-executor");
   executors[static_cast<size_t>(ExecutorType::RESOLVER)] =
-      grpc_core::New<Executor>("resolver-executor");
+      new Executor("resolver-executor");
 
   executors[static_cast<size_t>(ExecutorType::DEFAULT)]->Init();
   executors[static_cast<size_t>(ExecutorType::RESOLVER)]->Init();
@@ -418,14 +403,10 @@ void Executor::InitAll() {
   EXECUTOR_TRACE0("Executor::InitAll() done");
 }
 
-grpc_closure_scheduler* Executor::Scheduler(ExecutorType executor_type,
-                                            ExecutorJobType job_type) {
-  return &schedulers_[static_cast<size_t>(executor_type)]
-                     [static_cast<size_t>(job_type)];
-}
-
-grpc_closure_scheduler* Executor::Scheduler(ExecutorJobType job_type) {
-  return Executor::Scheduler(ExecutorType::DEFAULT, job_type);
+void Executor::Run(grpc_closure* closure, grpc_error_handle error,
+                   ExecutorType executor_type, ExecutorJobType job_type) {
+  executor_enqueue_fns_[static_cast<size_t>(executor_type)]
+                       [static_cast<size_t>(job_type)](closure, error);
 }
 
 void Executor::ShutdownAll() {
@@ -444,7 +425,7 @@ void Executor::ShutdownAll() {
   // Delete the executor objects.
   //
   // NOTE: It is important to call Shutdown() on all executors first before
-  // calling Delete() because it is possible for one executor (that is not
+  // calling delete  because it is possible for one executor (that is not
   // shutdown yet) to call Enqueue() on a different executor which is already
   // shutdown. This is legal and in such cases, the Enqueue() operation
   // effectively "fails" and enqueues that closure on the calling thread's
@@ -453,10 +434,8 @@ void Executor::ShutdownAll() {
   // By ensuring that all executors are shutdown first, we are also ensuring
   // that no thread is active across all executors.
 
-  grpc_core::Delete<Executor>(
-      executors[static_cast<size_t>(ExecutorType::DEFAULT)]);
-  grpc_core::Delete<Executor>(
-      executors[static_cast<size_t>(ExecutorType::RESOLVER)]);
+  delete executors[static_cast<size_t>(ExecutorType::DEFAULT)];
+  delete executors[static_cast<size_t>(ExecutorType::RESOLVER)];
   executors[static_cast<size_t>(ExecutorType::DEFAULT)] = nullptr;
   executors[static_cast<size_t>(ExecutorType::RESOLVER)] = nullptr;
 
@@ -485,6 +464,6 @@ void Executor::SetThreadingDefault(bool enable) {
   executors[static_cast<size_t>(ExecutorType::DEFAULT)]->SetThreading(enable);
 }
 
-void grpc_executor_global_init() { gpr_tls_init(&g_this_thread_state); }
+void grpc_executor_global_init() {}
 
 }  // namespace grpc_core

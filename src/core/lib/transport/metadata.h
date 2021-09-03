@@ -21,14 +21,14 @@
 
 #include <grpc/support/port_platform.h>
 
-#include <grpc/impl/codegen/log.h>
+#include <atomic>
 
 #include <grpc/grpc.h>
+#include <grpc/impl/codegen/log.h>
 #include <grpc/slice.h>
 
 #include "src/core/lib/debug/trace.h"
 #include "src/core/lib/gpr/useful.h"
-#include "src/core/lib/gprpp/atomic.h"
 #include "src/core/lib/gprpp/sync.h"
 #include "src/core/lib/slice/slice_utils.h"
 
@@ -37,11 +37,8 @@ extern grpc_core::DebugOnlyTraceFlag grpc_trace_metadata;
 /* This file provides a mechanism for tracking metadata through the grpc stack.
    It's not intended for consumption outside of the library.
 
-   Metadata is tracked in the context of a grpc_mdctx. For the time being there
-   is one of these per-channel, avoiding cross channel interference with memory
-   use and lock contention.
-
-   The context tracks unique strings (grpc_mdstr) and pairs of strings
+   Metadata is tracked in the context of a sharded global grpc_mdctx. The
+   context tracks unique strings (grpc_mdstr) and pairs of strings
    (grpc_mdelem). Any of these objects can be checked for equality by comparing
    their pointers. These objects are reference counted.
 
@@ -109,10 +106,10 @@ struct grpc_mdelem {
   ((grpc_mdelem_data_storage)((md).payload & (uintptr_t)3))
 #ifdef __cplusplus
 #define GRPC_MAKE_MDELEM(data, storage) \
-  (grpc_mdelem{((uintptr_t)(data)) | ((uintptr_t)storage)})
+  (grpc_mdelem{((uintptr_t)(data)) | ((uintptr_t)(storage))})
 #else
 #define GRPC_MAKE_MDELEM(data, storage) \
-  ((grpc_mdelem){((uintptr_t)(data)) | ((uintptr_t)storage)})
+  ((grpc_mdelem){((uintptr_t)(data)) | ((uintptr_t)(storage))})
 #endif
 #define GRPC_MDELEM_IS_INTERNED(md)          \
   ((grpc_mdelem_data_storage)((md).payload & \
@@ -206,8 +203,8 @@ typedef void (*destroy_user_data_func)(void* data);
 
 struct UserData {
   Mutex mu_user_data;
-  grpc_core::Atomic<destroy_user_data_func> destroy_user_data;
-  grpc_core::Atomic<void*> data;
+  std::atomic<destroy_user_data_func> destroy_user_data{nullptr};
+  std::atomic<void*> data{nullptr};
 };
 
 class StaticMetadata {
@@ -244,7 +241,7 @@ class RefcountedMdBase {
 #ifndef NDEBUG
   void Ref(const char* file, int line) {
     grpc_mdelem_trace_ref(this, key_, value_, RefValue(), file, line);
-    const intptr_t prior = refcnt_.FetchAdd(1, MemoryOrder::RELAXED);
+    const intptr_t prior = refcnt_.fetch_add(1, std::memory_order_relaxed);
     GPR_ASSERT(prior > 0);
   }
   bool Unref(const char* file, int line) {
@@ -256,10 +253,10 @@ class RefcountedMdBase {
     /* we can assume the ref count is >= 1 as the application is calling
        this function - meaning that no adjustment to mdtab_free is necessary,
        simplifying the logic here to be just an atomic increment */
-    refcnt_.FetchAdd(1, MemoryOrder::RELAXED);
+    refcnt_.fetch_add(1, std::memory_order_relaxed);
   }
   bool Unref() {
-    const intptr_t prior = refcnt_.FetchSub(1, MemoryOrder::ACQ_REL);
+    const intptr_t prior = refcnt_.fetch_sub(1, std::memory_order_acq_rel);
     GPR_DEBUG_ASSERT(prior > 0);
     return prior == 1;
   }
@@ -269,15 +266,17 @@ class RefcountedMdBase {
   void TraceAtStart(const char* tag);
 #endif
 
-  intptr_t RefValue() { return refcnt_.Load(MemoryOrder::RELAXED); }
-  bool AllRefsDropped() { return refcnt_.Load(MemoryOrder::ACQUIRE) == 0; }
-  bool FirstRef() { return refcnt_.FetchAdd(1, MemoryOrder::RELAXED) == 0; }
+  intptr_t RefValue() { return refcnt_.load(std::memory_order_relaxed); }
+  bool AllRefsDropped() { return refcnt_.load(std::memory_order_acquire) == 0; }
+  bool FirstRef() {
+    return refcnt_.fetch_add(1, std::memory_order_relaxed) == 0;
+  }
 
  private:
   /* must be byte compatible with grpc_mdelem_data */
   grpc_slice key_;
   grpc_slice value_;
-  grpc_core::Atomic<intptr_t> refcnt_;
+  std::atomic<intptr_t> refcnt_{0};
   uint32_t hash_ = 0;
 };
 
@@ -426,7 +425,7 @@ inline grpc_mdelem grpc_mdelem_from_slices(
     const grpc_core::ManagedMemorySlice& key,
     const grpc_core::UnmanagedMemorySlice& value) {
   using grpc_core::AllocatedMetadata;
-  return GRPC_MAKE_MDELEM(grpc_core::New<AllocatedMetadata>(key, value),
+  return GRPC_MAKE_MDELEM(new AllocatedMetadata(key, value),
                           GRPC_MDELEM_STORAGE_ALLOCATED);
 }
 
@@ -434,7 +433,7 @@ inline grpc_mdelem grpc_mdelem_from_slices(
     const grpc_core::ExternallyManagedSlice& key,
     const grpc_core::UnmanagedMemorySlice& value) {
   using grpc_core::AllocatedMetadata;
-  return GRPC_MAKE_MDELEM(grpc_core::New<AllocatedMetadata>(key, value),
+  return GRPC_MAKE_MDELEM(new AllocatedMetadata(key, value),
                           GRPC_MDELEM_STORAGE_ALLOCATED);
 }
 
@@ -442,7 +441,7 @@ inline grpc_mdelem grpc_mdelem_from_slices(
     const grpc_core::StaticMetadataSlice& key,
     const grpc_core::UnmanagedMemorySlice& value) {
   using grpc_core::AllocatedMetadata;
-  return GRPC_MAKE_MDELEM(grpc_core::New<AllocatedMetadata>(key, value),
+  return GRPC_MAKE_MDELEM(new AllocatedMetadata(key, value),
                           GRPC_MDELEM_STORAGE_ALLOCATED);
 }
 

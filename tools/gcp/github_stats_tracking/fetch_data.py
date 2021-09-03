@@ -12,9 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from github import Github, Label
-from datetime import datetime, timedelta
+from datetime import datetime
+from datetime import timedelta
 from time import time
+
+from github import Github
+from github import Label
 from google.cloud import bigquery
 
 ACCESS_TOKEN = ""
@@ -47,8 +50,7 @@ def get_stats_from_github():
         if issue.pull_request is None and is_untriaged(issue)
     ]
     total_bugs = [
-        issue
-        for issue in repo.get_issues(state='all', labels=[LABEL_KIND_BUG])
+        issue for issue in repo.get_issues(state='all', labels=[LABEL_KIND_BUG])
         if issue.pull_request is None
     ]
 

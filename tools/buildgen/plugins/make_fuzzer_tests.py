@@ -28,20 +28,23 @@ def mako_plugin(dictionary):
             new_target['run'] = False
             new_target['src'].append(
                 'test/core/util/one_corpus_entry_fuzzer.cc')
-            new_target['own_src'].append(
-                'test/core/util/one_corpus_entry_fuzzer.cc')
+
+            # avoid having two main() methods
+            to_remove = 'test/core/util/fuzzer_corpus_test.cc'
+            if to_remove in new_target['src']:
+                new_target['src'].remove(to_remove)
+
             targets.append(new_target)
             for corpus in new_target['corpus_dirs']:
                 for fn in sorted(glob.glob('%s/*' % corpus)):
                     tests.append({
                         'name': new_target['name'],
                         'args': [fn],
-                        'exclude_iomgrs': ['uv'],
                         'exclude_configs': ['tsan'],
                         'uses_polling': False,
                         'platforms': ['mac', 'linux'],
                         'ci_platforms': ['linux'],
                         'flaky': False,
-                        'language': 'c',
+                        'language': 'c++',
                         'cpu_cost': 0.1,
                     })
